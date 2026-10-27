@@ -7,8 +7,21 @@ class GeminiVisionService {
   static const String _apiKey = String.fromEnvironment('GEMINI_API_KEY');
 
   Future<ListingDraft> analyzeProductImage(File imageFile) async {
+    if (_apiKey.trim().isEmpty) {
+      throw Exception(
+        'ไม่พบ GEMINI_API_KEY กรุณาเปิดแอปด้วย '
+        '--dart-define=GEMINI_API_KEY=your_key',
+      );
+    }
+
     final bytes = await imageFile.readAsBytes();
-    final imagePart = DataPart('image/jpeg', bytes);
+    final extension = imageFile.path.split('.').last.toLowerCase();
+    final mimeType = switch (extension) {
+      'png' => 'image/png',
+      'webp' => 'image/webp',
+      _ => 'image/jpeg',
+    };
+    final imagePart = DataPart(mimeType, bytes);
 
     final model = GenerativeModel(
       model: 'gemini-3.5-flash-lite',
@@ -24,7 +37,7 @@ class GeminiVisionService {
     );
 
     final response = await model.generateContent([
-      Content.multi([prompt, imagePart])
+      Content.multi([prompt, imagePart]),
     ]);
 
     final responseText = response.text;
@@ -33,7 +46,10 @@ class GeminiVisionService {
     }
 
     // ทำความสะอาดข้อความเผื่อมี Markdown code block เช่น ```json ... ```
-    String cleanedJsonText = responseText.replaceAll('```json', '').replaceAll('```', '').trim();
+    String cleanedJsonText = responseText
+        .replaceAll('```json', '')
+        .replaceAll('```', '')
+        .trim();
 
     // แปลงข้อความ JSON เป็น Map
     final Map<String, dynamic> jsonMap = jsonDecode(cleanedJsonText);

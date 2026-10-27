@@ -1,81 +1,197 @@
+
 import 'dart:io';
+
 import 'package:flutter/material.dart';
 import 'package:image_picker/image_picker.dart';
+
 import '../models/item.dart';
 import '../models/listing_draft.dart';
+import '../repositories/listing_draft_repository.dart';
 import '../services/gemini_vision_service.dart';
+import 'my_drafts_page.dart';
 
 class SellItemPage extends StatefulWidget {
-  final Function(Item) onItemCreated;
+  final ListingDraftRepository draftRepository;
+  final void Function(Item item)? onItemCreated;
 
-  const SellItemPage({super.key, required this.onItemCreated});
+  const SellItemPage({
+    super.key,
+    required this.draftRepository,
+    this.onItemCreated,
+  });
 
   @override
   State<SellItemPage> createState() => _SellItemPageState();
 }
 
 class _SellItemPageState extends State<SellItemPage> {
-  File? _selectedImage;
-  bool _isLoading = false;
+  final _formKey = GlobalKey<FormState>();
 
-  // Controllers สำหรับให้ผู้ใช้ตรวจทานและแก้ไขข้อความ (Human-in-the-loop)
-  final TextEditingController _titleController = TextEditingController();
-  final TextEditingController _priceController = TextEditingController();
-  final TextEditingController _descriptionController = TextEditingController();
+  final _titleController = TextEditingController();
+  final _categoryController = TextEditingController();
+  final _descriptionController = TextEditingController();
 
-  final GeminiVisionService _visionService = GeminiVisionService();
+  final ImagePicker _imagePicker = ImagePicker();
+  final GeminiVisionService _geminiService = GeminiVisionService();
 
-  // ฟังก์ชันเลือกรูปภาพจากแกลเลอรี
-  Future<void> _pickImage() async {
-    final picker = ImagePicker();
-    final pickedFile = await picker.pickImage(source: ImageSource.gallery);
+  File? _imageFile;
 
-    if (pickedFile == null) return;
+  bool _isGeneratingAI = false;
+  bool _isSavingDraft = false;
 
-    setState(() {
-      _selectedImage = File(pickedFile.path);
-    });
+  bool get _isBusy => _isGeneratingAI || _isSavingDraft;
+
+  @override
+  void dispose() {
+    _titleController.dispose();
+    _categoryController.dispose();
+    _descriptionController.dispose();
+    super.dispose();
   }
 
-  // ฟังก์ชันเรียกใช้งาน GeminiVisionService เพื่อวิเคราะห์ภาพสินค้า
-  Future<void> _analyzeImageWithAI() async {
-    if (_selectedImage == null) {
-      ScaffoldMessenger.of(context).showSnackBar(
-        const SnackBar(content: Text('กรุณาเลือกรูปภาพสินค้าก่อนให้ AI ช่วยแนะนำ')),
+  // เลือกรูปภาพสินค้า
+  Future<void> _pickImage() async {
+    if (_isBusy) return;
+
+    try {
+      final image = await _imagePicker.pickImage(
+        source: ImageSource.gallery,
+        imageQuality: 80,
       );
+
+      if (image == null || !mounted) return;
+
+      setState(() {
+        _imageFile = File(image.path);
+      });
+    } catch (e) {
+      if (!mounted) return;
+
+      _showMessage('เลือกรูปภาพไม่สำเร็จ: $e');
+    }
+  }
+
+  // ใช้ AI วิเคราะห์รูปภาพและสร้างร่างประกาศ
+  Future<void> _generateDraftWithAI() async {
+    if (_isBusy) return;
+
+    if (_imageFile == null) {
+      _showMessage('กรุณาเลือกรูปภาพสินค้าก่อนใช้ AI');
       return;
     }
 
     setState(() {
-      _isLoading = true;
+      _isGeneratingAI = true;
     });
 
     try {
-      ListingDraft draft = await _visionService.analyzeProductImage(_selectedImage!);
+      final ListingDraft draft =
+          await _geminiService.analyzeProductImage(_imageFile!);
 
-      // นำผลลัพธ์จาก AI มาใส่ใน TextField เพื่อให้ผู้ใช้ตรวจสอบและแก้ไขได้ทันที
+      if (!mounted) return;
+
       setState(() {
         _titleController.text = draft.title;
+        _categoryController.text = draft.category;
         _descriptionController.text = draft.description;
-        _priceController.text = "150"; // ราคาเริ่มต้นตั้งต้น
       });
 
-      if (context.mounted) {
-        ScaffoldMessenger.of(context).showSnackBar(
-          const SnackBar(content: Text('AI วิเคราะห์ข้อมูลสินค้าสำเร็จ! กรุณาตรวจสอบก่อนกดยืนยัน')),
-        );
-      }
+      _showMessage(
+        'AI สร้างร่างประกาศให้แล้ว กรุณาตรวจสอบข้อมูลก่อนบันทึก',
+      );
     } catch (e) {
-      if (context.mounted) {
-        ScaffoldMessenger.of(context).showSnackBar(
-          SnackBar(content: Text('เกิดข้อผิดพลาดในการวิเคราะห์: ${e.toString()}')),
-        );
-      }
+      if (!mounted) return;
+
+      _showMessage('AI สร้างร่างไม่สำเร็จ: $e');
     } finally {
-      setState(() {
-        _isLoading = false;
-      });
+      if (mounted) {
+        setState(() {
+          _isGeneratingAI = false;
+        });
+      }
     }
+  }
+
+  // บันทึกร่างลงฐานข้อมูล SQLite
+  Future<void> _confirmDraft() async {
+    if (_isSavingDraft || _isGeneratingAI) return;
+
+    if (!_formKey.currentState!.validate()) return;
+
+    final imageFile = _imageFile;
+
+    if (imageFile == null) {
+      _showMessage('กรุณาเลือกรูปภาพสินค้า');
+      return;
+    }
+
+    setState(() {
+      _isSavingDraft = true;
+    });
+
+    try {
+      final draft = ListingDraft(
+        title: _titleController.text.trim(),
+        category: _categoryController.text.trim(),
+        description: _descriptionController.text.trim(),
+      );
+
+      // รอให้ฐานข้อมูลบันทึกเสร็จก่อนล้างฟอร์ม
+      await widget.draftRepository.saveDraft(
+        draft,
+        imageFile.path,
+      );
+
+      if (!mounted) return;
+
+      _showMessage('บันทึกร่างประกาศเรียบร้อยแล้ว');
+
+      // ล้างเฉพาะข้อมูลบนฟอร์ม
+      // ไม่ลบรายการที่บันทึกไว้ใน SQLite
+      _titleController.clear();
+      _categoryController.clear();
+      _descriptionController.clear();
+
+      setState(() {
+        _imageFile = null;
+      });
+    } catch (e) {
+      if (!mounted) return;
+
+      _showMessage('บันทึกร่างไม่สำเร็จ: $e');
+    } finally {
+      if (mounted) {
+        setState(() {
+          _isSavingDraft = false;
+        });
+      }
+    }
+  }
+
+  // เปิดหน้าร่างประกาศของฉัน
+  void _openMyDrafts() {
+    Navigator.push(
+      context,
+      MaterialPageRoute(
+        builder: (_) => MyDraftsPage(
+          repository: widget.draftRepository,
+        ),
+      ),
+    );
+  }
+
+  // แสดงข้อความแจ้งเตือน
+  void _showMessage(String message) {
+    if (!mounted) return;
+
+    ScaffoldMessenger.of(context)
+      ..hideCurrentSnackBar()
+      ..showSnackBar(
+        SnackBar(
+          content: Text(message),
+          behavior: SnackBarBehavior.floating,
+        ),
+      );
   }
 
   @override
@@ -83,141 +199,183 @@ class _SellItemPageState extends State<SellItemPage> {
     return Scaffold(
       appBar: AppBar(
         title: const Text('ลงประกาศขายสินค้า'),
+        actions: [
+          IconButton(
+            tooltip: 'ร่างประกาศของฉัน',
+            icon: const Icon(Icons.history),
+            onPressed: _openMyDrafts,
+          ),
+        ],
       ),
-      body: SingleChildScrollView(
-        padding: const EdgeInsets.all(16.0),
-        child: Column(
-          crossAxisAlignment: CrossAxisAlignment.stretch,
-          children: [
-            // ส่วนแสดงรูปภาพสินค้า
-            Container(
-              height: 200,
-              decoration: BoxDecoration(
-                color: Colors.grey[200],
-                borderRadius: BorderRadius.circular(12),
-                border: Border.all(color: Colors.grey.shade400),
+      body: SafeArea(
+        child: Form(
+          key: _formKey,
+          child: ListView(
+            padding: const EdgeInsets.all(16),
+            children: [
+              Text(
+                'สร้างร่างประกาศด้วย AI',
+                style: Theme.of(context).textTheme.titleLarge,
               ),
-              child: _selectedImage != null
-                  ? ClipRRect(
-                      borderRadius: BorderRadius.circular(12),
-                      child: Image.file(
-                        _selectedImage!,
-                        fit: BoxFit.cover,
-                      ),
-                    )
-                  : const Center(
-                      child: Column(
-                        mainAxisAlignment: MainAxisAlignment.center,
-                        children: [
-                          Icon(Icons.image, size: 64, color: Colors.grey),
-                          SizedBox(height: 8),
-                          Text('ยังไม่ได้เลือกรูปภาพสินค้า',
-                              style: TextStyle(color: Colors.grey)),
-                        ],
-                      ),
-                    ),
-            ),
-            const SizedBox(height: 16),
+              const SizedBox(height: 8),
 
-            // ปุ่มเลือกรูปภาพ
-            ElevatedButton.icon(
-              onPressed: _isLoading ? null : _pickImage,
-              icon: const Icon(Icons.photo_library),
-              label: const Text('เลือกรูปภาพสินค้า'),
-            ),
-            const SizedBox(height: 8),
-
-            // ปุ่มเรียก AI พร้อมแสดงสถานะโหลด
-            OutlinedButton.icon(
-              onPressed: _isLoading ? null : _analyzeImageWithAI,
-              icon: _isLoading
-                  ? const SizedBox(
-                      width: 20,
-                      height: 20,
-                      child: CircularProgressIndicator(strokeWidth: 2),
-                    )
-                  : const Icon(Icons.auto_awesome),
-              label: Text(_isLoading ? 'AI กำลังวิเคราะห์ภาพสินค้า...' : 'ให้ AI ช่วยแนะนำ'),
-            ),
-            const SizedBox(height: 20),
-
-            // ฟอร์มกรอกและแก้ไขข้อมูลสินค้า (Human-in-the-loop)
-            TextField(
-              controller: _titleController,
-              decoration: const InputDecoration(
-                labelText: 'ชื่อสินค้า',
-                border: OutlineInputBorder(),
+              const Text(
+                'เลือกรูปสินค้า แล้วให้ AI ช่วยวิเคราะห์ '
+                'และเขียนรายละเอียดประกาศ',
               ),
-            ),
-            const SizedBox(height: 12),
-            TextField(
-              controller: _priceController,
-              keyboardType: TextInputType.number,
-              decoration: const InputDecoration(
-                labelText: 'ราคา (บาท)',
-                border: OutlineInputBorder(),
+              const SizedBox(height: 16),
+
+              // ปุ่มเลือกรูปภาพ
+              OutlinedButton.icon(
+                onPressed: _isBusy ? null : _pickImage,
+                icon: const Icon(Icons.photo_library_outlined),
+                label: const Text('เลือกรูปภาพจากเครื่อง'),
               ),
-            ),
-            const SizedBox(height: 12),
-            TextField(
-              controller: _descriptionController,
-              maxLines: 4,
-              decoration: const InputDecoration(
-                labelText: 'คำอธิบายสินค้า',
-                border: OutlineInputBorder(),
+              const SizedBox(height: 12),
+
+              // แสดงรูปภาพที่เลือก
+              if (_imageFile != null)
+                ClipRRect(
+                  borderRadius: BorderRadius.circular(12),
+                  child: Image.file(
+                    _imageFile!,
+                    height: 200,
+                    width: double.infinity,
+                    fit: BoxFit.cover,
+                    errorBuilder: (context, error, stackTrace) {
+                      return Container(
+                        height: 130,
+                        alignment: Alignment.center,
+                        color: Colors.grey.shade200,
+                        child: const Text('ไม่สามารถแสดงรูปภาพได้'),
+                      );
+                    },
+                  ),
+                )
+              else
+                Container(
+                  height: 130,
+                  alignment: Alignment.center,
+                  decoration: BoxDecoration(
+                    border: Border.all(color: Colors.grey),
+                    borderRadius: BorderRadius.circular(12),
+                  ),
+                  child: const Column(
+                    mainAxisAlignment: MainAxisAlignment.center,
+                    children: [
+                      Icon(Icons.image_outlined, size: 40),
+                      SizedBox(height: 8),
+                      Text('ยังไม่ได้เลือกรูปภาพ'),
+                    ],
+                  ),
+                ),
+
+              const SizedBox(height: 12),
+
+              // ปุ่ม AI
+              FilledButton.icon(
+                onPressed: _isBusy ? null : _generateDraftWithAI,
+                icon: _isGeneratingAI
+                    ? const SizedBox(
+                        width: 18,
+                        height: 18,
+                        child: CircularProgressIndicator(
+                          strokeWidth: 2,
+                          color: Colors.white,
+                        ),
+                      )
+                    : const Icon(Icons.auto_awesome),
+                label: Text(
+                  _isGeneratingAI
+                      ? 'AI กำลังวิเคราะห์รูปภาพ...'
+                      : 'AI ช่วยสร้างร่างประกาศ',
+                ),
               ),
-            ),
-            const SizedBox(height: 24),
 
-            // ปุ่ม "ยืนยันร่างประกาศ"
-            ElevatedButton(
-              style: ElevatedButton.styleFrom(
-                backgroundColor: Colors.deepPurple,
-                foregroundColor: Colors.white,
-                padding: const EdgeInsets.symmetric(vertical: 16),
+              const SizedBox(height: 24),
+              const Divider(),
+              const SizedBox(height: 12),
+
+              Text(
+                'ตรวจสอบและแก้ไขข้อมูล',
+                style: Theme.of(context).textTheme.titleMedium,
               ),
-              onPressed: () {
-                if (_titleController.text.isEmpty || _priceController.text.isEmpty) {
-                  ScaffoldMessenger.of(context).showSnackBar(
-                    const SnackBar(content: Text('กรุณากรอกชื่อและราคาสินค้า')),
-                  );
-                  return;
-                }
+              const SizedBox(height: 16),
 
-                final double parsedPrice = double.tryParse(_priceController.text) ?? 0.0;
-
-                // สร้าง Item จากข้อมูลในฟอร์ม (ที่ผู้ใช้ตรวจทานและแก้ไขเรียบร้อยแล้ว)
-                final newItem = Item(
-                  id: DateTime.now().millisecondsSinceEpoch,
-                  title: _titleController.text,
-                  price: parsedPrice,
-                  description: _descriptionController.text,
-                  category: 'General',
-                  imageUrl: _selectedImage?.path ?? '',
-                );
-
-                // ส่งข้อมูลไปยังระบบหลัก (เพื่อไปโชว์ที่หน้าหลัก)
-                widget.onItemCreated(newItem);
-
-                // เคลียร์ฟอร์มและรีเซ็ตสถานะกลับเป็นค่าว่าง พร้อมเริ่มลงประกาศใหม่
-                setState(() {
-                  _titleController.clear();
-                  _priceController.clear();
-                  _descriptionController.clear();
-                  _selectedImage = null;
-                });
-
-                // แสดง SnackBar แจ้งเตือนความสำเร็จตามข้อกำหนด (ไม่ต้องใช้ Navigator.pop)
-                ScaffoldMessenger.of(context).showSnackBar(
-                  const SnackBar(content: Text('บันทึกร่างประกาศเรียบร้อยแล้ว')),
-                );
-              },
-              child: const Text(
-                'ยืนยันร่างประกาศ',
-                style: TextStyle(fontSize: 16, fontWeight: FontWeight.bold),
+              // ชื่อสินค้า
+              TextFormField(
+                controller: _titleController,
+                enabled: !_isBusy,
+                decoration: const InputDecoration(
+                  labelText: 'ชื่อสินค้า',
+                  border: OutlineInputBorder(),
+                ),
+                validator: (value) {
+                  if (value == null || value.trim().isEmpty) {
+                    return 'กรุณากรอกชื่อสินค้า';
+                  }
+                  return null;
+                },
               ),
-            ),
-          ],
+              const SizedBox(height: 16),
+
+              // หมวดหมู่สินค้า
+              TextFormField(
+                controller: _categoryController,
+                enabled: !_isBusy,
+                decoration: const InputDecoration(
+                  labelText: 'หมวดหมู่',
+                  border: OutlineInputBorder(),
+                ),
+                validator: (value) {
+                  if (value == null || value.trim().isEmpty) {
+                    return 'กรุณากรอกหมวดหมู่สินค้า';
+                  }
+                  return null;
+                },
+              ),
+              const SizedBox(height: 16),
+
+              // รายละเอียดสินค้า
+              TextFormField(
+                controller: _descriptionController,
+                enabled: !_isBusy,
+                maxLines: 4,
+                decoration: const InputDecoration(
+                  labelText: 'รายละเอียดสินค้า',
+                  alignLabelWithHint: true,
+                  border: OutlineInputBorder(),
+                ),
+                validator: (value) {
+                  if (value == null || value.trim().isEmpty) {
+                    return 'กรุณากรอกรายละเอียดสินค้า';
+                  }
+                  return null;
+                },
+              ),
+              const SizedBox(height: 24),
+
+              // ยืนยันและบันทึกร่าง
+              FilledButton.icon(
+                onPressed: _isBusy ? null : _confirmDraft,
+                icon: _isSavingDraft
+                    ? const SizedBox(
+                        width: 18,
+                        height: 18,
+                        child: CircularProgressIndicator(
+                          strokeWidth: 2,
+                          color: Colors.white,
+                        ),
+                      )
+                    : const Icon(Icons.save_outlined),
+                label: Text(
+                  _isSavingDraft
+                      ? 'กำลังบันทึก...'
+                      : 'ยืนยันและบันทึกร่างประกาศ',
+                ),
+              ),
+            ],
+          ),
         ),
       ),
     );
