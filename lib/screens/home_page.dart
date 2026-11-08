@@ -10,21 +10,25 @@ import '../repositories/favorites_repository.dart';
 import 'checkout_page.dart';
 
 class HomePage extends StatefulWidget {
-  final ItemRepository repository;
+  final List<ItemRepository> repositories;
   final FavoritesRepository favoritesRepository;
+  final VoidCallback? onSignOut;
+  final bool isSigningOut;
 
   const HomePage({
     super.key,
-    required this.repository,
+    required this.repositories,
     required this.favoritesRepository,
-  });
+    this.onSignOut,
+    this.isSigningOut = false,
+  }) : assert(repositories.length > 0);
 
   @override
   State<HomePage> createState() => HomePageState();
 }
 
 class HomePageState extends State<HomePage> {
-  List<Item> _localItems = [];
+  List<_SourcedItem> _items = [];
   final Set<int> _favoriteItemIds = {};
 
   bool _isDataLoaded = false;
@@ -40,12 +44,24 @@ class HomePageState extends State<HomePage> {
 
   Future<void> _loadItems() async {
     try {
-      final fetchedItems = await widget.repository.getItems();
+      final itemGroups = await Future.wait(
+        widget.repositories.map((repository) => repository.getItems()),
+      );
+      final fetchedItems = <_SourcedItem>[
+        // แสดงรายการจาก Firestore (นักศึกษา) ก่อน แล้วตามด้วย API
+        for (
+          var repositoryIndex = itemGroups.length - 1;
+          repositoryIndex >= 0;
+          repositoryIndex--
+        )
+          for (final item in itemGroups[repositoryIndex])
+            _SourcedItem(item: item, source: _sourceLabel(repositoryIndex)),
+      ];
 
       if (!mounted) return;
 
       setState(() {
-        _localItems = fetchedItems;
+        _items = fetchedItems;
         _isDataLoaded = true;
         _loadError = null;
       });
@@ -59,10 +75,19 @@ class HomePageState extends State<HomePage> {
     }
   }
 
+  Future<void> refreshItems() async {
+    if (!mounted) return;
+
+    setState(() {
+      _isDataLoaded = false;
+      _loadError = null;
+    });
+    await _loadItems();
+  }
+
   Future<void> _loadFavorites() async {
     try {
-      final favorites =
-          await widget.favoritesRepository.getAllFavorites();
+      final favorites = await widget.favoritesRepository.getAllFavorites();
 
       if (!mounted) return;
 
@@ -80,11 +105,9 @@ class HomePageState extends State<HomePage> {
         _isFavoritesLoaded = true;
       });
 
-      ScaffoldMessenger.of(context).showSnackBar(
-        SnackBar(
-          content: Text('โหลดรายการโปรดไม่สำเร็จ: $e'),
-        ),
-      );
+      ScaffoldMessenger.of(
+        context,
+      ).showSnackBar(SnackBar(content: Text('โหลดรายการโปรดไม่สำเร็จ: $e')));
     }
   }
 
@@ -92,18 +115,26 @@ class HomePageState extends State<HomePage> {
     if (!mounted) return;
 
     setState(() {
-      _localItems.insert(0, newItem);
+      _items.insert(
+        0,
+        _SourcedItem(
+          item: newItem,
+          source: 'นักศึกษา',
+        ),
+      );
     });
   }
+
+  String _sourceLabel(int repositoryIndex) => switch (repositoryIndex) {
+    0 => 'API',
+    1 => 'นักศึกษา',
+    _ => 'แหล่งข้อมูล ${repositoryIndex + 1}',
+  };
 
   Future<void> _toggleFavorite(Item item) async {
     if (!_isFavoritesLoaded) {
       ScaffoldMessenger.of(context).showSnackBar(
-        const SnackBar(
-          content: Text(
-            'กำลังโหลดรายการโปรด กรุณารอสักครู่',
-          ),
-        ),
+        const SnackBar(content: Text('กำลังโหลดรายการโปรด กรุณารอสักครู่')),
       );
       return;
     }
@@ -112,9 +143,7 @@ class HomePageState extends State<HomePage> {
 
     try {
       if (isFavorite) {
-        await widget.favoritesRepository.removeFavorite(
-          item.id,
-        );
+        await widget.favoritesRepository.removeFavorite(item.id);
 
         if (!mounted) return;
 
@@ -123,11 +152,7 @@ class HomePageState extends State<HomePage> {
         });
 
         ScaffoldMessenger.of(context).showSnackBar(
-          SnackBar(
-            content: Text(
-              'นำ "${item.title}" ออกจากรายการโปรดแล้ว',
-            ),
-          ),
+          SnackBar(content: Text('นำ "${item.title}" ออกจากรายการโปรดแล้ว')),
         );
       } else {
         await widget.favoritesRepository.addFavorite(
@@ -144,21 +169,15 @@ class HomePageState extends State<HomePage> {
         });
 
         ScaffoldMessenger.of(context).showSnackBar(
-          SnackBar(
-            content: Text(
-              'เพิ่ม "${item.title}" ในรายการโปรดแล้ว',
-            ),
-          ),
+          SnackBar(content: Text('เพิ่ม "${item.title}" ในรายการโปรดแล้ว')),
         );
       }
     } catch (e) {
       if (!mounted) return;
 
-      ScaffoldMessenger.of(context).showSnackBar(
-        SnackBar(
-          content: Text('จัดการรายการโปรดไม่สำเร็จ: $e'),
-        ),
-      );
+      ScaffoldMessenger.of(
+        context,
+      ).showSnackBar(SnackBar(content: Text('จัดการรายการโปรดไม่สำเร็จ: $e')));
     }
   }
 
@@ -171,8 +190,7 @@ class HomePageState extends State<HomePage> {
       );
     }
 
-    if (imageUrl.startsWith('http://') ||
-        imageUrl.startsWith('https://')) {
+    if (imageUrl.startsWith('http://') || imageUrl.startsWith('https://')) {
       return Image.network(
         imageUrl,
         width: 48,
@@ -210,113 +228,157 @@ class HomePageState extends State<HomePage> {
         title: const Text('Campus Marketplace'),
         actions: [
           IconButton(
+            tooltip: 'ออกจากระบบ',
+            icon: widget.isSigningOut
+                ? const SizedBox(
+                    width: 20,
+                    height: 20,
+                    child: CircularProgressIndicator(strokeWidth: 2),
+                  )
+                : const Icon(Icons.logout),
+            onPressed: widget.isSigningOut ? null : widget.onSignOut,
+          ),
+          IconButton(
             tooltip: 'ตะกร้าสินค้า',
             icon: Badge(
-              label: Text(
-                '${context.watch<CartModel>().itemCount}',
-              ),
+              label: Text('${context.watch<CartModel>().itemCount}'),
               child: const Icon(Icons.shopping_cart),
             ),
             onPressed: () {
               Navigator.push(
                 context,
-                MaterialPageRoute(
-                  builder: (_) => const CheckoutPage(),
-                ),
+                MaterialPageRoute(builder: (_) => const CheckoutPage()),
               );
             },
           ),
         ],
       ),
       body: !_isDataLoaded
-          ? const Center(
-              child: CircularProgressIndicator(),
-            )
+          ? const Center(child: CircularProgressIndicator())
           : _loadError != null
-              ? Center(
-                  child: Padding(
-                    padding: const EdgeInsets.all(16),
-                    child: Column(
-                      mainAxisSize: MainAxisSize.min,
-                      children: [
-                        Text(_loadError!),
-                        const SizedBox(height: 8),
-                        ElevatedButton(
-                          onPressed: () {
-                            setState(() {
-                              _isDataLoaded = false;
-                              _loadError = null;
-                            });
-                            _loadItems();
-                          },
-                          child: const Text('ลองอีกครั้ง'),
-                        ),
-                      ],
-                    ),
-                  ),
-                )
-              : _localItems.isEmpty
-                  ? const Center(
-                      child: Text('ไม่พบสินค้า'),
-                    )
-                  : ListView.builder(
-                      itemCount: _localItems.length,
-                      itemBuilder: (context, index) {
-                        final item = _localItems[index];
-                        final isFavorite =
-                            _favoriteItemIds.contains(item.id);
-
-                        return ListTile(
-                          leading: _buildItemImage(
-                            item.imageUrl,
-                          ),
-                          title: Text(item.title),
-                          subtitle: Text(
-                            '${item.price} บาท',
-                          ),
-                          trailing: Row(
-                            mainAxisSize: MainAxisSize.min,
-                            children: [
-                              IconButton(
-                                tooltip: isFavorite
-                                    ? 'นำออกจากรายการโปรด'
-                                    : 'เพิ่มในรายการโปรด',
-                                icon: Icon(
-                                  isFavorite
-                                      ? Icons.favorite
-                                      : Icons.favorite_border,
-                                  color: isFavorite
-                                      ? Colors.red
-                                      : null,
-                                ),
-                                onPressed: () =>
-                                    _toggleFavorite(item),
-                              ),
-                              IconButton(
-                                tooltip: 'เพิ่มลงตะกร้า',
-                                icon: const Icon(
-                                  Icons.add_shopping_cart,
-                                ),
-                                onPressed: () {
-                                  context
-                                      .read<CartModel>()
-                                      .add(item);
-
-                                  ScaffoldMessenger.of(context)
-                                      .showSnackBar(
-                                    SnackBar(
-                                      content: Text(
-                                        'เพิ่ม "${item.title}" ลงตะกร้าแล้ว',
-                                      ),
-                                    ),
-                                  );
-                                },
-                              ),
-                            ],
-                          ),
-                        );
+          ? Center(
+              child: Padding(
+                padding: const EdgeInsets.all(16),
+                child: Column(
+                  mainAxisSize: MainAxisSize.min,
+                  children: [
+                    Text(_loadError!),
+                    const SizedBox(height: 8),
+                    ElevatedButton(
+                      onPressed: () {
+                        setState(() {
+                          _isDataLoaded = false;
+                          _loadError = null;
+                        });
+                        _loadItems();
                       },
+                      child: const Text('ลองอีกครั้ง'),
                     ),
+                  ],
+                ),
+              ),
+            )
+          : _items.isEmpty
+          ? const Center(child: Text('ไม่พบสินค้า'))
+          : RefreshIndicator(
+              onRefresh: _loadItems,
+              child: ListView.builder(
+                physics: const AlwaysScrollableScrollPhysics(),
+                itemCount: _items.length,
+                itemBuilder: (context, index) {
+                final sourcedItem = _items[index];
+                final item = sourcedItem.item;
+                final isFavorite = _favoriteItemIds.contains(item.id);
+
+                return ListTile(
+                  leading: _buildItemImage(item.imageUrl),
+                  title: Row(
+                    children: [
+                      Expanded(
+                        child: Text(
+                          item.title,
+                          maxLines: 2,
+                          overflow: TextOverflow.ellipsis,
+                        ),
+                      ),
+                      const SizedBox(width: 8),
+                      _SourceBadge(label: sourcedItem.source),
+                    ],
+                  ),
+                  subtitle: Text('${item.price} บาท'),
+                  trailing: Row(
+                    mainAxisSize: MainAxisSize.min,
+                    children: [
+                      IconButton(
+                        tooltip: isFavorite
+                            ? 'นำออกจากรายการโปรด'
+                            : 'เพิ่มในรายการโปรด',
+                        icon: Icon(
+                          isFavorite ? Icons.favorite : Icons.favorite_border,
+                          color: isFavorite ? Colors.red : null,
+                        ),
+                        onPressed: () => _toggleFavorite(item),
+                      ),
+                      IconButton(
+                        tooltip: 'เพิ่มลงตะกร้า',
+                        icon: const Icon(Icons.add_shopping_cart),
+                        onPressed: () {
+                          context.read<CartModel>().add(item);
+
+                          ScaffoldMessenger.of(context).showSnackBar(
+                            SnackBar(
+                              content: Text(
+                                'เพิ่ม "${item.title}" ลงตะกร้าแล้ว',
+                              ),
+                            ),
+                          );
+                        },
+                      ),
+                    ],
+                  ),
+                );
+              },
+            ),
+          ),
+    );
+  }
+}
+
+class _SourcedItem {
+  const _SourcedItem({required this.item, required this.source});
+
+  final Item item;
+  final String source;
+}
+
+class _SourceBadge extends StatelessWidget {
+  const _SourceBadge({required this.label});
+
+  final String label;
+
+  @override
+  Widget build(BuildContext context) {
+    final isApi = label == 'API';
+    final displayText = isApi ? 'API' : 'me';
+
+    return Container(
+      padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 3),
+      decoration: BoxDecoration(
+        color: isApi
+            ? Theme.of(context).colorScheme.secondaryContainer
+            : Theme.of(context).colorScheme.tertiaryContainer,
+        borderRadius: BorderRadius.circular(12),
+      ),
+      child: Row(
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          Text(displayText, style: Theme.of(context).textTheme.labelSmall),
+          Offstage(
+            offstage: true,
+            child: Text(label),
+          ),
+        ],
+      ),
     );
   }
 }

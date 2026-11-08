@@ -1,26 +1,26 @@
-
 import 'package:flutter/material.dart';
 
 import '../models/item.dart';
 import '../repositories/item_repository.dart';
 import '../repositories/favorites_repository.dart';
 import '../repositories/listing_draft_repository.dart';
+import '../services/auth_service.dart';
 
 import 'home_page.dart';
 import 'sell_item_page.dart';
 import 'favorites_page.dart';
 
 class MainScaffold extends StatefulWidget {
-  final ItemRepository itemRepository;
+  final List<ItemRepository> itemRepositories;
   final FavoritesRepository favoritesRepository;
   final ListingDraftRepository draftRepository;
 
   const MainScaffold({
     super.key,
-    required this.itemRepository,
+    required this.itemRepositories,
     required this.favoritesRepository,
     required this.draftRepository,
-  });
+  }) : assert(itemRepositories.length > 0);
 
   @override
   State<MainScaffold> createState() => _MainScaffoldState();
@@ -28,9 +28,9 @@ class MainScaffold extends StatefulWidget {
 
 class _MainScaffoldState extends State<MainScaffold> {
   int _selectedIndex = 0;
+  bool _isSigningOut = false;
 
-  final GlobalKey<HomePageState> _homePageKey =
-      GlobalKey<HomePageState>();
+  final GlobalKey<HomePageState> _homePageKey = GlobalKey<HomePageState>();
 
   void _onItemCreated(Item item) {
     _homePageKey.currentState?.addLocalItem(item);
@@ -40,10 +40,42 @@ class _MainScaffoldState extends State<MainScaffold> {
     });
 
     ScaffoldMessenger.of(context).showSnackBar(
-      const SnackBar(
-        content: Text('เพิ่มสินค้าลงหน้าหลักเรียบร้อยแล้ว'),
-      ),
+      const SnackBar(content: Text('เพิ่มสินค้าลงหน้าหลักเรียบร้อยแล้ว')),
     );
+  }
+
+  Future<void> _refreshHomeItems() async {
+    await _homePageKey.currentState?.refreshItems();
+  }
+
+  Future<void> _signOut() async {
+    if (_isSigningOut) return;
+
+    setState(() {
+      _isSigningOut = true;
+    });
+
+    try {
+      final messenger = ScaffoldMessenger.of(context);
+      await AuthService().signOut();
+      messenger.showSnackBar(const SnackBar(content: Text('ออกจากระบบแล้ว')));
+    } on AuthServiceException catch (error) {
+      if (!mounted) return;
+      ScaffoldMessenger.of(
+        context,
+      ).showSnackBar(SnackBar(content: Text(error.message)));
+    } catch (_) {
+      if (!mounted) return;
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(content: Text('ออกจากระบบไม่สำเร็จ กรุณาลองอีกครั้ง')),
+      );
+    } finally {
+      if (mounted) {
+        setState(() {
+          _isSigningOut = false;
+        });
+      }
+    }
   }
 
   @override
@@ -51,23 +83,21 @@ class _MainScaffoldState extends State<MainScaffold> {
     final pages = <Widget>[
       HomePage(
         key: _homePageKey,
-        repository: widget.itemRepository,
+        repositories: widget.itemRepositories,
         favoritesRepository: widget.favoritesRepository,
+        onSignOut: _signOut,
+        isSigningOut: _isSigningOut,
       ),
       SellItemPage(
         draftRepository: widget.draftRepository,
         onItemCreated: _onItemCreated,
+        onListingsChanged: _refreshHomeItems,
       ),
-      FavoritesPage(
-        repository: widget.favoritesRepository,
-      ),
+      FavoritesPage(repository: widget.favoritesRepository),
     ];
 
     return Scaffold(
-      body: IndexedStack(
-        index: _selectedIndex,
-        children: pages,
-      ),
+      body: IndexedStack(index: _selectedIndex, children: pages),
       bottomNavigationBar: NavigationBar(
         selectedIndex: _selectedIndex,
         onDestinationSelected: (index) {
@@ -75,7 +105,7 @@ class _MainScaffoldState extends State<MainScaffold> {
             _selectedIndex = index;
           });
         },
-        destinations: const [
+        destinations: [
           NavigationDestination(
             icon: Icon(Icons.home_outlined),
             selectedIcon: Icon(Icons.home),

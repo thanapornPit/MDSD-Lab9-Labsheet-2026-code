@@ -8,11 +8,8 @@
 //    ให้ widget หา เกิด ProviderNotFoundException ทันที ในเทสนี้จึงต้องครอบ
 //    ChangeNotifierProvider ให้เองตรงนี้ด้วย
 //
-// 2) MyApp เปิดหน้าแรกด้วย HomePage(repository: ItemRepositoryApi()) ซึ่งเรียก
-//    เครือข่ายจริงใน initState() แต่ Flutter จะดักจับ HttpClient ทุกตัวระหว่างรัน
-//    widget test แล้วตอบกลับสถานะ 400 เสมอ (ไม่เรียกเครือข่ายจริง) ทำให้ได้ Exception
-//    "สถานะ 400" ทุกครั้งโดยไม่เกี่ยวกับ API จริงเลย เทสนี้จึงใช้ repository ปลอม
-//    (_FakeItemRepository) ที่ไม่เรียกเครือข่ายแทน เพื่อตรวจสถานะ "กำลังโหลด" ได้แน่นอน
+// 2) HomePage loads items from every repository in initState(). This test uses
+//    fake repositories so it can reliably check the loading and source badges.
 //
 // เรื่อง Widget Testing แบบเต็มรูปแบบ (รวมถึงการจำลอง Mock/Fake แบบนี้) จะเรียน
 // ละเอียดในสัปดาห์ที่ 10
@@ -34,9 +31,13 @@ import 'package:campus_marketplace_w7/screens/home_page.dart';
 /// Future ที่คืนไปจะ "ค้าง" อยู่ตลอด (ไม่มีวัน complete) เพื่อให้ทดสอบจับสถานะ
 /// "กำลังโหลด" (CircularProgressIndicator) ได้แน่นอนทุกครั้งที่รัน
 class _FakeItemRepository implements ItemRepository {
+  _FakeItemRepository({this.items});
+
+  List<Item>? items;
+
   @override
   Future<List<Item>> getItems() {
-    return Completer<List<Item>>().future;
+    return items == null ? Completer<List<Item>>().future : Future.value(items);
   }
 }
 
@@ -57,14 +58,16 @@ class _FakeFavoritesRepository implements FavoritesRepository {
 }
 
 void main() {
-  testWidgets('แอปเปิดขึ้นมาแสดงชื่อแอปและสถานะกำลังโหลดสินค้า', (WidgetTester tester) async {
+  testWidgets('แอปเปิดขึ้นมาแสดงชื่อแอปและสถานะกำลังโหลดสินค้า', (
+    WidgetTester tester,
+  ) async {
     await tester.pumpWidget(
       ChangeNotifierProvider(
         create: (context) => CartModel(),
         child: MaterialApp(
           title: 'Campus Marketplace',
           home: HomePage(
-            repository: _FakeItemRepository(),
+            repositories: [_FakeItemRepository()],
             favoritesRepository: _FakeFavoritesRepository(),
           ),
         ),
@@ -75,5 +78,84 @@ void main() {
     // (ตั้งใจให้ค้างสถานะ "กำลังโหลด" ไว้) ต้องการแค่ตรวจสอบสถานะเริ่มต้นเท่านั้น
     expect(find.text('Campus Marketplace'), findsOneWidget);
     expect(find.byType(CircularProgressIndicator), findsOneWidget);
+  });
+
+  testWidgets('รวมสินค้าจากทุกรายการและแสดงป้ายแหล่งที่มา', (
+    WidgetTester tester,
+  ) async {
+    final apiItem = Item(
+      id: 1,
+      title: 'สินค้าจาก API',
+      price: 10,
+      description: '',
+      category: 'General',
+      imageUrl: '',
+    );
+    final firestoreItem = Item(
+      id: 2,
+      title: 'สินค้าจากนักศึกษา',
+      price: 20,
+      description: '',
+      category: 'General',
+      imageUrl: '',
+    );
+
+    await tester.pumpWidget(
+      ChangeNotifierProvider(
+        create: (context) => CartModel(),
+        child: MaterialApp(
+          home: HomePage(
+            repositories: [
+              _FakeItemRepository(items: [apiItem]),
+              _FakeItemRepository(items: [firestoreItem]),
+            ],
+            favoritesRepository: _FakeFavoritesRepository(),
+          ),
+        ),
+      ),
+    );
+    await tester.pumpAndSettle();
+
+    expect(find.text('สินค้าจาก API'), findsOneWidget);
+    expect(find.text('สินค้าจากนักศึกษา'), findsOneWidget);
+    expect(find.text('API'), findsOneWidget);
+    expect(find.text('นักศึกษา'), findsOneWidget);
+  });
+
+  testWidgets('รีเฟรชรายการสินค้าแล้วแสดงสินค้าที่เพิ่มภายหลัง', (
+    WidgetTester tester,
+  ) async {
+    final repository = _FakeItemRepository(items: []);
+    final homeKey = GlobalKey<HomePageState>();
+
+    await tester.pumpWidget(
+      ChangeNotifierProvider(
+        create: (context) => CartModel(),
+        child: MaterialApp(
+          home: HomePage(
+            key: homeKey,
+            repositories: [repository],
+            favoritesRepository: _FakeFavoritesRepository(),
+          ),
+        ),
+      ),
+    );
+    await tester.pumpAndSettle();
+    expect(find.text('ไม่พบสินค้า'), findsOneWidget);
+
+    repository.items = [
+      Item(
+        id: 3,
+        title: 'ประกาศใหม่',
+        price: 30,
+        description: '',
+        category: 'General',
+        imageUrl: '',
+      ),
+    ];
+    await homeKey.currentState!.refreshItems();
+    await tester.pumpAndSettle();
+
+    expect(find.text('ประกาศใหม่'), findsOneWidget);
   });
 }

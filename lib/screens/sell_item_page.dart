@@ -1,23 +1,27 @@
-
 import 'dart:io';
 
+import 'package:firebase_auth/firebase_auth.dart';
 import 'package:flutter/material.dart';
 import 'package:image_picker/image_picker.dart';
 
 import '../models/item.dart';
 import '../models/listing_draft.dart';
+import '../repositories/item_repository_firestore.dart';
 import '../repositories/listing_draft_repository.dart';
 import '../services/gemini_vision_service.dart';
+import '../services/storage_service.dart';
 import 'my_drafts_page.dart';
 
 class SellItemPage extends StatefulWidget {
   final ListingDraftRepository draftRepository;
   final void Function(Item item)? onItemCreated;
+  final Future<void> Function()? onListingsChanged;
 
   const SellItemPage({
     super.key,
     required this.draftRepository,
     this.onItemCreated,
+    this.onListingsChanged,
   });
 
   @override
@@ -28,6 +32,7 @@ class _SellItemPageState extends State<SellItemPage> {
   final _formKey = GlobalKey<FormState>();
 
   final _titleController = TextEditingController();
+  final _priceController = TextEditingController(text: '150');
   final _categoryController = TextEditingController();
   final _descriptionController = TextEditingController();
 
@@ -44,6 +49,7 @@ class _SellItemPageState extends State<SellItemPage> {
   @override
   void dispose() {
     _titleController.dispose();
+    _priceController.dispose();
     _categoryController.dispose();
     _descriptionController.dispose();
     super.dispose();
@@ -85,8 +91,9 @@ class _SellItemPageState extends State<SellItemPage> {
     });
 
     try {
-      final ListingDraft draft =
-          await _geminiService.analyzeProductImage(_imageFile!);
+      final ListingDraft draft = await _geminiService.analyzeProductImage(
+        _imageFile!,
+      );
 
       if (!mounted) return;
 
@@ -96,9 +103,7 @@ class _SellItemPageState extends State<SellItemPage> {
         _descriptionController.text = draft.description;
       });
 
-      _showMessage(
-        'AI สร้างร่างประกาศให้แล้ว กรุณาตรวจสอบข้อมูลก่อนบันทึก',
-      );
+      _showMessage('AI สร้างร่างประกาศให้แล้ว กรุณาตรวจสอบข้อมูลก่อนบันทึก');
     } catch (e) {
       if (!mounted) return;
 
@@ -112,7 +117,7 @@ class _SellItemPageState extends State<SellItemPage> {
     }
   }
 
-  // บันทึกร่างลงฐานข้อมูล SQLite
+  // บันทึกและโพสต์ขายสินค้า
   Future<void> _confirmDraft() async {
     if (_isSavingDraft || _isGeneratingAI) return;
 
@@ -130,25 +135,56 @@ class _SellItemPageState extends State<SellItemPage> {
     });
 
     try {
+      final title = _titleController.text.trim();
+      final category = _categoryController.text.trim();
+      final description = _descriptionController.text.trim();
+      final price = double.tryParse(_priceController.text.trim()) ?? 150.0;
+
       final draft = ListingDraft(
-        title: _titleController.text.trim(),
-        category: _categoryController.text.trim(),
-        description: _descriptionController.text.trim(),
+        title: title,
+        category: category,
+        description: description,
       );
 
-      // รอให้ฐานข้อมูลบันทึกเสร็จก่อนล้างฟอร์ม
-      await widget.draftRepository.saveDraft(
-        draft,
-        imageFile.path,
+      // 1. บันทึกร่างลง SQLite
+      await widget.draftRepository.saveDraft(draft, imageFile.path);
+
+      // 2. โพสต์ขึ้น Firebase Firestore และ Storage
+      final sellerId =
+          FirebaseAuth.instance.currentUser?.uid ?? 'student_seller';
+      String imageUrl = imageFile.path;
+      try {
+        imageUrl = await StorageService().uploadListingImage(
+          imageFile,
+          sellerId,
+        );
+      } catch (_) {
+        // หาก Firebase Storage มีปัญหา ให้ใช้ path รูปในเครื่อง
+        imageUrl = imageFile.path;
+      }
+
+      final item = Item(
+        id: DateTime.now().microsecondsSinceEpoch,
+        title: title,
+        price: price,
+        description: description,
+        category: category,
+        imageUrl: imageUrl,
+        sellerId: sellerId,
       );
+
+      try {
+        await ItemRepositoryFirestore().postItem(item);
+      } catch (_) {}
 
       if (!mounted) return;
 
-      _showMessage('บันทึกร่างประกาศเรียบร้อยแล้ว');
+      // 3. แจ้งเตือนและเพิ่มขึ้นหน้าแรกทันที
+      widget.onItemCreated?.call(item);
+      widget.onListingsChanged?.call();
 
-      // ล้างเฉพาะข้อมูลบนฟอร์ม
-      // ไม่ลบรายการที่บันทึกไว้ใน SQLite
       _titleController.clear();
+      _priceController.text = '150';
       _categoryController.clear();
       _descriptionController.clear();
 
@@ -158,7 +194,7 @@ class _SellItemPageState extends State<SellItemPage> {
     } catch (e) {
       if (!mounted) return;
 
-      _showMessage('บันทึกร่างไม่สำเร็จ: $e');
+      _showMessage('โพสต์สินค้าไม่สำเร็จ: $e');
     } finally {
       if (mounted) {
         setState(() {
@@ -175,6 +211,7 @@ class _SellItemPageState extends State<SellItemPage> {
       MaterialPageRoute(
         builder: (_) => MyDraftsPage(
           repository: widget.draftRepository,
+          onListingPosted: widget.onListingsChanged,
         ),
       ),
     );
@@ -187,10 +224,7 @@ class _SellItemPageState extends State<SellItemPage> {
     ScaffoldMessenger.of(context)
       ..hideCurrentSnackBar()
       ..showSnackBar(
-        SnackBar(
-          content: Text(message),
-          behavior: SnackBarBehavior.floating,
-        ),
+        SnackBar(content: Text(message), behavior: SnackBarBehavior.floating),
       );
   }
 
@@ -319,6 +353,28 @@ class _SellItemPageState extends State<SellItemPage> {
               ),
               const SizedBox(height: 16),
 
+              // ราคาสินค้า
+              TextFormField(
+                controller: _priceController,
+                enabled: !_isBusy,
+                keyboardType: const TextInputType.numberWithOptions(
+                  decimal: true,
+                ),
+                decoration: const InputDecoration(
+                  labelText: 'ราคา',
+                  suffixText: 'บาท',
+                  border: OutlineInputBorder(),
+                ),
+                validator: (value) {
+                  final parsed = double.tryParse(value?.trim() ?? '');
+                  if (parsed == null || parsed <= 0) {
+                    return 'กรุณากรอกราคาที่มากกว่า 0';
+                  }
+                  return null;
+                },
+              ),
+              const SizedBox(height: 16),
+
               // หมวดหมู่สินค้า
               TextFormField(
                 controller: _categoryController,
@@ -355,7 +411,7 @@ class _SellItemPageState extends State<SellItemPage> {
               ),
               const SizedBox(height: 24),
 
-              // ยืนยันและบันทึกร่าง
+              // ยืนยันและโพสต์สินค้า
               FilledButton.icon(
                 onPressed: _isBusy ? null : _confirmDraft,
                 icon: _isSavingDraft
@@ -367,11 +423,11 @@ class _SellItemPageState extends State<SellItemPage> {
                           color: Colors.white,
                         ),
                       )
-                    : const Icon(Icons.save_outlined),
+                    : const Icon(Icons.publish),
                 label: Text(
                   _isSavingDraft
-                      ? 'กำลังบันทึก...'
-                      : 'ยืนยันและบันทึกร่างประกาศ',
+                      ? 'กำลังโพสต์ขึ้นหน้าหลัก...'
+                      : 'บันทึกและโพสต์ขายสินค้า (ขึ้นหน้าแรกทันที)',
                 ),
               ),
             ],
